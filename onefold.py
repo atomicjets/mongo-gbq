@@ -1,11 +1,7 @@
 #!/usr/bin/env python
 
 #
-# Copyright 2015, OneFold
-# All rights reserved.
-# http://www.onefold.io
-#
-# Author: Jorge Chang
+# Author: Raghav Rastogi
 #
 # See license in LICENSE file.
 #
@@ -21,7 +17,8 @@ import codecs
 import pprint
 import json
 from onefold_util import execute
-from dw_util import Hive
+from dw_util import Hive, GBigQuery
+from cs_util import HDFSStorage, GCloudStorage
 
 
 NUM_RECORDS_PER_PART = 100000
@@ -62,6 +59,7 @@ def jsonpath_get(mydict, path):
 class Loader:
 
   # control params
+  infra_type = None
   mongo_uri = None
   db_name = None
   collection_name = None
@@ -71,8 +69,12 @@ class Loader:
   schema_db_name = None
   schema_collection_name = None
   use_mr = False
+
   hiveserveer_host = None
   hiveserver_port = None
+
+  gcloud_project_id = None
+  gcloud_storage_bucket_id = None
 
   write_disposition = None
   process_array = "child_table"
@@ -92,6 +94,7 @@ class Loader:
   sort_by_field_max = None
   dw_table_names = []
   dw = None
+  cs = None
   num_records_extracted = 0
   num_records_rejected = 0
 
@@ -113,7 +116,12 @@ class Loader:
       self.mongo_schema_collection.remove({})
 
     # create data warehouse object
-    self.dw = Hive(self.hiveserveer_host, self.hiveserver_port, ONEFOLD_HIVESERDES_JAR)
+    if self.infra_type == 'hadoop':
+      self.dw = Hive(self.hiveserveer_host, self.hiveserver_port, ONEFOLD_HIVESERDES_JAR)
+      self.cs = HDFSStorage()
+    elif self.infra_type == 'gcloud':
+      self.dw = GBigQuery(self.gcloud_project_id, self.gcloud_storage_bucket_id)
+      self.cs = GCloudStorage(self.gcloud_project_id, self.gcloud_storage_bucket_id)
 
     # turn policies into better data structure for use later (required_fields)
     if self.policies != None:
@@ -254,13 +262,15 @@ class Loader:
     hdfs_mr_output_folder = "%s/%s/schema_gen/output" % (HDFS_PATH, self.collection_name)
 
     # delete folders
-    execute("hadoop fs -rm -r -f %s" % hdfs_data_folder)
-    execute("hadoop fs -rm -r -f %s" % hdfs_mr_output_folder)
+    self.cs.rmdir(hdfs_data_folder)
+    self.cs.rmdir(hdfs_mr_output_folder)
+    
 
     # copy extracted files to hdfs data folder
-    execute("hadoop fs -mkdir -p %s" % hdfs_data_folder)
+    self.cs.mkdir(hdfs_data_folder)
+
     for extract_file_name in self.extract_file_names:
-      execute("hadoop fs -copyFromLocal %s %s/" % (extract_file_name, hdfs_data_folder))
+      self.cs.copy_from_local(extract_file_name, hdfs_data_folder)
 
     hadoop_command = """hadoop jar %s \
                               -D mapred.job.name="onefold-mongo-generate-schema" \
@@ -287,15 +297,15 @@ class Loader:
     execute(command)
 
     # delete folders
-    execute("hadoop fs -rm -r -f %s" % hdfs_mr_output_folder)
+    self.cs.rmdir (hdfs_mr_output_folder)
 
     # manually copy files into hdfs
     fragment_values = self.get_fragments()
     for fragment_value in fragment_values:
-      execute("hadoop fs -mkdir -p %s/%s" % (hdfs_mr_output_folder, fragment_value), ignore_error=True)
-      execute("hadoop fs -copyFromLocal %s/%s/part-00000 %s/%s/" % (transform_data_tmp_path, fragment_value,
-                                                                    hdfs_mr_output_folder, fragment_value))
-
+      self.cs.mkdir("%s/%s" % (hdfs_mr_output_folder, fragment_value))
+      self.cs.copy_from_local("%s/%s/part-00000" % (transform_data_tmp_path, fragment_value),
+                              "%s/%s/" % (hdfs_mr_output_folder, fragment_value))
+      
 
   def mr_data_transform(self):
 
@@ -303,8 +313,7 @@ class Loader:
     hdfs_mr_output_folder = "%s/%s/data_transform/output" % (HDFS_PATH, self.collection_name)
 
     # delete folders
-    execute("hadoop fs -rm -r -f %s" % hdfs_mr_output_folder)
-
+    self.cs.rmdir(hdfs_mr_output_folder)
 
     hadoop_command = """hadoop jar %s \
                               -libjars %s \
@@ -455,19 +464,29 @@ def main():
                       help='MongoDB collection name to store schema. If not provided, default to [source_collection]_schema')
   parser.add_argument('--write_disposition', metavar='write_disposition', type=str,
                       help='overwrite or append. Default is overwrite', default='overwrite', choices=['overwrite', 'append'])
-  parser.add_argument('--hiveserver_host', metavar='hiveserver_host', type=str, required=True, help='Hiveserver host')
-  parser.add_argument('--hiveserver_port', metavar='hiveserver_port', type=str, required=True, help='Hiveserver port')
-  parser.add_argument('--hive_db_name', metavar='hive_db_name', type=str,
+  parser.add_argument('--dest_db_name', metavar='dest_db_name', type=str,
                       help='Hive database name. If not provided, default to \'default\' hive database.')
-  parser.add_argument('--hive_table_name', metavar='hive_table_name', type=str,
+  parser.add_argument('--dest_table_name', metavar='dest_table_name', type=str,
                       help='Hive table name. If not provided, default to source collection name.')
   parser.add_argument('--use_mr', action='store_true')
   parser.add_argument('--policy_file', metavar='policy_file', type=str,
                       help='Data Policy file name.')
+  parser.add_argument('--infra_type', metavar='infra_type', type=str, default='hadoop',
+                      help='Infrastructure type. One of hadoop or gcloud')
+
+  # hive related parameters
+  parser.add_argument('--hiveserver_host', metavar='hiveserver_host', type=str, required=False, help='Hiveserver host')
+  parser.add_argument('--hiveserver_port', metavar='hiveserver_port', type=str, required=False, help='Hiveserver port')
+
+  # gcloud related parameters
+  parser.add_argument('--gcloud_project_id', metavar='gcloud_project_id', type=str, required=False, help='GCloud project id')
+  parser.add_argument('--gcloud_storage_bucket_id', metavar='gcloud_storage_bucket_id', type=str, required=False, help='GCloud storage bucket id')
+
   args = parser.parse_args()
 
   # global mongo_uri, db_name, collection_name, extract_query, tmp_path, schema_db_name, schema_collection_name, use_mr
   loader = Loader()
+  loader.infra_type = args.infra_type
   loader.mongo_uri = args.mongo
   loader.db_name = args.source_db
   loader.collection_name = args.source_collection
@@ -485,18 +504,32 @@ def main():
   else:
     loader.schema_collection_name = "%s_schema" % args.source_collection
 
-  loader.hiveserver_host = args.hiveserver_host
-  loader.hiveserver_port = args.hiveserver_port
+  if args.infra_type == 'hadoop':
+    if args.hiveserver_host is None:
+      raise ValueError("hiveserver_host must be specified for 'hadoop' infrastructure type.")
+    if args.hiveserver_port is None:
+      raise ValueError("hiveserver_port must be specified for 'hadoop' infrastructure type.")
+
+    loader.hiveserver_host = args.hiveserver_host
+    loader.hiveserver_port = args.hiveserver_port
+  else:
+    if args.gcloud_project_id is None:
+      raise ValueError("gcloud_project_id must be specified for 'gcloud' infrastructure type.")
+    if args.gcloud_storage_bucket_id is None:
+      raise ValueError("gcloud_storage_bucket_id must be specified for 'gcloud' infrastructure type.")
+
+    loader.gcloud_project_id = args.gcloud_project_id
+    loader.gcloud_storage_bucket_id = args.gcloud_storage_bucket_id
 
   loader.write_disposition = args.write_disposition
 
-  if args.hive_table_name != None:
-    loader.dw_table_name = args.hive_table_name
+  if args.dest_table_name != None:
+    loader.dw_table_name = args.dest_table_name
   else:
     loader.dw_table_name = args.source_collection
 
-  if args.hive_db_name != None:
-    loader.dw_database_name = args.hive_db_name
+  if args.dest_db_name != None:
+    loader.dw_database_name = args.dest_db_name
 
   if args.use_mr:
     loader.use_mr = args.use_mr

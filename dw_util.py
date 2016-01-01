@@ -1,11 +1,7 @@
 #!/usr/bin/env python
 
 #
-# Copyright 2015, OneFold
-# All rights reserved.
-# http://www.onefold.io
-#
-# Author: Jorge Chang
+# Author: Raghav Rastogi
 #
 # See license in LICENSE file.
 #
@@ -13,10 +9,12 @@
 # basic functionaliy like create table, update table, list tables, execute queries / DMLs, etc.
 #
 
-import json
 import abc
-import re
+import json
 import pprint
+import re
+
+from onefold_util import execute, execute_and_read
 
 
 class DataWarehouse:
@@ -341,6 +339,309 @@ class Hive(DataWarehouse):
   def load_table(self, database_name, table_name, file_path):
     sql = "load data inpath '%s*' into table `%s`" % (file_path, table_name)
     self.execute_sql(database_name, sql, fetch_result = False)
+
+  def query(self, database_name, query):
+    result = self.execute_sql(database_name, query, True)
+    output = {}
+    output['rows'] = []
+    for r in result:
+      f = []
+      for i in r:
+        f.append({"v": i})
+      output['rows'].append({"f": f})
+
+    return output
+
+
+# Implementation for Google BigQuery
+class GBigQuery(DataWarehouse):
+
+  project_id = None
+  bucket_id = None
+
+  def __init__(self, project_id, bucket_id):
+    print '-- Initializing Google BigQuery module --'
+    self.project_id = project_id
+    self.bucket_id = bucket_id 
+
+  def create_dataset(self, database_name):
+    command = "bq --project_id %s mk %s" % (self.project_id, database_name)
+    execute(command, ignore_error=True)
+
+  def delete_dataset(self, database_name):
+    pass
+
+  def create_table(self, database_name, table_name, schema_fields, process_array = "child_table"):
+    
+#     pprint.pprint(schema_fields)
+
+    new_schema_fields = []
+    for schema_field in schema_fields:
+        
+        # skip if data_type = record
+        if schema_field['data_type'] == 'record':
+            continue
+        
+        new_schema_field = {}
+        
+        new_schema_field['type'] = schema_field['data_type']
+        new_schema_field['name'] = schema_field['key']
+        new_schema_field['mode'] = schema_field['mode']
+        
+        new_schema_fields.append(new_schema_field)
+        
+    schema_json = json.dumps(new_schema_fields)
+
+    schema_file_name = "%s_%s_schema.json" % (database_name, table_name)           
+    schema_file = open(schema_file_name, "w")           
+    schema_file.write(schema_json)           
+    schema_file.close()
+    
+    print 'Creating table: %s.%s with schema: %s' % (database_name, table_name, schema_file_name)
+    command = "bq --project_id %s mk --schema %s %s.%s" % (self.project_id, schema_file_name, 
+                                                           database_name, table_name)
+    execute(command)
+    
+    
+#     # used to keep track of table_name -> column list
+#     table_columns = {}
+# 
+#     for field in schema_fields:
+#       data_type = None
+# 
+#       if field['data_type'] == 'string':
+#         data_type = 'string'
+#       elif field['data_type'] in ('timestamp', 'boolean'):
+#         data_type = field['type']
+#       elif field['data_type'] == 'float':
+#         data_type = 'double'
+#       elif field['data_type'] ==  'integer':
+#         data_type = 'int'
+#       elif field['data_type'] in ('record'):
+#         # ignore record
+#         pass
+#       else:
+#         raise Exception("Unsupported data type %s for column %s" % (field['data_type'], field['key']))
+# 
+#       if data_type is not None:
+#         if field['mode'] == 'repeated':
+#           if process_array == "child_table":
+#             child_table_name = table_name + "_" + re.sub("[^0-9a-zA-Z_]", '_', field['key']).lower()
+#             column_name = "value"
+#           else:
+#             continue
+#         else:
+#           if "." in field['key']:
+#             if process_array == "child_table":
+#               child_table_name = table_name + "_" + re.sub("[^0-9a-zA-Z_]", '_', field['key'].rsplit(".",1)[0]).lower()
+#               column_name = field['key'].rsplit(".",1)[1]
+#               print "  Child Table column:" + column_name
+#             else:
+#               child_table_name = table_name
+#               column_name = field['key'].split(".",1)[0]
+#               data_type = "string"
+#               print "  Inline column:" + column_name
+#           else:
+#             child_table_name = table_name
+#             column_name = field['key']
+# 
+#         if child_table_name not in table_columns:
+#           table_columns[child_table_name] = set()
+#           if child_table_name != table_name:
+#             table_columns[child_table_name].add("%s %s" % ("parent_hash_code", "string"))
+#             table_columns[child_table_name].add("%s %s" % ("hash_code", "string"))
+# 
+#         table_columns[child_table_name].add("`%s` %s" % (column_name, data_type))
+# 
+#     for table_name, columns in table_columns.iteritems():
+#       sql = "create table `%s` (%s) ROW FORMAT SERDE 'com.cloudera.hive.serde.JSONSerDe' " % (table_name, ",".join(columns))
+#       self.execute_sql(database_name, sql)
+
+#     return table_columns.keys()
+
+  def update_table(self, database_name, table_name, schema_fields):
+
+    # current columns
+    table_names = self.list_tables(database_name, table_name)
+    current_table_columns = {}
+    for table_name in table_names:
+      current_columns = {}
+      current_schema = self.get_table_schema(database_name, table_name)
+      for field in current_schema:
+        current_columns[field['key']] = field['data_type']
+      current_table_columns[table_name] = current_columns
+
+    # used to keep track of table_name -> column list
+    new_table_columns = {}
+
+    alter_sqls = []
+    modify_instructions = {}
+
+    for field in schema_fields:
+
+      # print "processing field %s" % str(field)
+      sql_data_type = None
+
+      if field['data_type'] == 'string':
+        sql_data_type = 'string'
+      elif field['data_type'] in ('timestamp', 'boolean'):
+        sql_data_type = field['type']
+      elif field['data_type'] == 'float':
+        sql_data_type = 'double'
+      elif field['data_type'] ==  'integer':
+        sql_data_type = 'int'
+      elif field['data_type'] in ('record'):
+        # ignore record
+        pass
+      else:
+        raise Exception("Unsupported data type %s for column %s" % (field['data_type'], field['key']))
+
+      if sql_data_type is not None:
+
+        if field['mode'] == 'repeated':
+          child_table_name = table_name + "_" + re.sub("[^0-9a-zA-Z_]", '_', field['key']).lower()
+          column_name = "value"
+        else:
+          if "." in field['key']:
+            child_table_name = table_name + "_" + re.sub("[^0-9a-zA-Z_]", '_', field['key'].rsplit(".",1)[0]).lower()
+            column_name = field['key'].rsplit(".",1)[1]
+          else:
+            child_table_name = table_name
+            column_name = field['key']
+
+        # print "column name %s" % column_name
+        if child_table_name in current_table_columns:
+          current_columns = current_table_columns[child_table_name]
+          if column_name in current_columns:
+            print "  column %s found in current table schema." % column_name
+            if field['data_type'].lower() != current_columns[column_name].lower():
+              print "  but data type is different. new: %s old: %s" % (field['data_type'], current_columns[column_name])
+              if child_table_name not in modify_instructions:
+                modify_instructions[child_table_name] = {}
+              modify_instructions[child_table_name][column_name] = sql_data_type
+            else:
+              print "  data type is same.. no-op."
+              pass
+          else:
+            print "  column %s not found in current table schema." % column_name
+            alter_sqls.append ("alter table `%s` add columns (`%s` %s)" % (child_table_name, column_name, sql_data_type))
+
+        else:
+          # new table needed
+          if child_table_name not in new_table_columns:
+            new_table_columns[child_table_name] = []
+            new_table_columns[child_table_name].append("%s %s" % ("parent_hash_code", "string"))
+            new_table_columns[child_table_name].append("%s %s" % ("hash_code", "string"))
+          new_table_columns[child_table_name].append("`%s` %s" % (column_name, sql_data_type))
+
+    # generate sqls to modify column data type
+    modify_sqls = []
+    for child_table_name, modify_columns in modify_instructions.iteritems():
+      for modify_column_name, data_type in modify_columns.iteritems():
+        modify_sqls.append("alter table `%s` change `%s` `%s` %s" % (child_table_name, modify_column_name, modify_column_name, data_type))
+
+    # execute alter table to change data type
+    for sql in modify_sqls:
+      self.execute_sql(database_name, sql)
+
+    # execute alter table to add columns
+    for sql in alter_sqls:
+      self.execute_sql(database_name, sql)
+
+    # create new tables
+    for child_table_name, columns in new_table_columns.iteritems():
+      sql = "create table `%s` (%s) ROW FORMAT SERDE 'com.cloudera.hive.serde.JSONSerDe' " % (child_table_name, ",".join(columns))
+      self.execute_sql(database_name, sql)
+
+    return table_names + new_table_columns.keys()
+
+  def delete_table(self, database_name, table_name):
+    command = "bq --project_id %s rm -f %s.%s" % (self.project_id, database_name, table_name)
+    execute(command, ignore_error=True)
+      
+#     sql = "drop table if exists `%s`" % (table_name)
+#     self.execute_sql(database_name, sql, False)
+# 
+#     child_table_names = self.list_tables(database_name, table_name)
+#     for child_table_name in child_table_names:
+#       sql = "drop table if exists `%s`" % (child_table_name)
+#       self.execute_sql(database_name, sql, False)
+
+  def get_num_rows(self, database_name, table_name):
+    sql = "select count(*) from `%s`" % (table_name)
+    r = self.execute_sql(database_name, sql, True)
+    return r[0][0]
+
+  def table_exists(self, database_name, table_name):
+      
+    all_tables = self.list_tables(database_name, table_name)
+    for table in all_tables:
+        if table == table_name:
+            return True
+    
+    return False      
+      
+      
+#     r = self.execute_sql(database_name, "show tables", True)
+#     for row in r:
+#       if row[0] == table_name:
+#         return True
+# 
+#     return False
+
+  def get_table_schema(self, database_name, table_name):
+
+    sql = "desc %s" % (table_name)
+    r = self.execute_sql(database_name, sql, True)
+
+    fields = []
+    for row in r:
+      d = {}
+      if 'string' in row[1]:
+        d['data_type'] = 'string'
+      elif 'float' in row[1] or 'double' in row[1]:
+        d['data_type'] = 'float'
+      elif 'int' in row[1] or 'bigint' in row[1]:
+        d['data_type'] = 'integer'
+      elif 'timestamp' in row[1]:
+        d['data_type'] = 'timestamp'
+      elif 'boolean' in row[1]:
+        d['data_type'] = 'boolean'
+
+      d['key'] = row[0]
+      d['mode'] = 'nullable'
+      fields.append(d)
+
+    return fields
+
+  def get_job_state(self, job_id):
+
+    job_state = None
+    job_result = None
+    job_error_message = None
+    job_error_reason = None
+    job_output_rows = 0
+
+    return (job_state, job_result, job_error_message, job_error_reason, job_output_rows)
+
+
+  def list_tables(self, database_name, table_prefix):
+    output = []
+    (rc, stdout_lines, stderr_lines) = execute_and_read("bq --project_id %s --format csv ls %s" % (self.project_id, database_name))
+    for line in stdout_lines:
+        table_name = line.split(",")[0]
+        if table_name.startswith(table_prefix):
+            output.append(table_name)
+    return output
+
+  def load_table(self, database_name, table_name, file_path):
+      
+      command = "bq --project_id %s --nosync load --source_format NEWLINE_DELIMITED_JSON %s.%s gs://%s/%s*" % \
+                    (self.project_id, database_name, table_name, self.bucket_id, file_path)
+      execute(command)
+      
+#     sql = "load data inpath '%s*' into table `%s`" % (file_path, table_name)
+#     self.execute_sql(database_name, sql, fetch_result = False)
 
   def query(self, database_name, query):
     result = self.execute_sql(database_name, query, True)
