@@ -1,4 +1,4 @@
-# Mongo - Hive Connector
+# Mongo - Google Big Query Connector
 
 Super-easy way to load your MongoDB collection into Hive. The code creates Hive schema automatically by performing a deep inspection of each MongoDB record and deriving the data type of each field. Supports basic data types, nested objects, array of primitive data types and array of objects.
 
