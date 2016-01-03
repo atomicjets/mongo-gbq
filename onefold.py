@@ -23,7 +23,7 @@ from cs_util import HDFSStorage, GCloudStorage
 
 NUM_RECORDS_PER_PART = 100000
 TMP_PATH = '/tmp/onefold_mongo'
-HDFS_PATH = 'onefold_mongo'
+CLOUD_STORAGE_PATH = 'onefold_mongo'
 HADOOP_MAPREDUCE_STREAMING_LIB = "/usr/hdp/current/hadoop-mapreduce-client/hadoop-streaming.jar"
 ONEFOLD_MAPREDUCE_JAR = os.getcwd() + "/java/MapReduce/target/MapReduce-0.0.1-SNAPSHOT.jar"
 ONEFOLD_HIVESERDES_JAR = os.getcwd() + "/java/HiveSerdes/target/hive-serdes-1.0-SNAPSHOT.jar"
@@ -258,8 +258,8 @@ class Loader:
 
   def mr_schema_gen(self):
 
-    hdfs_data_folder = "%s/%s/data" % (HDFS_PATH, self.collection_name)
-    hdfs_mr_output_folder = "%s/%s/schema_gen/output" % (HDFS_PATH, self.collection_name)
+    hdfs_data_folder = "%s/%s/data" % (CLOUD_STORAGE_PATH, self.collection_name)
+    hdfs_mr_output_folder = "%s/%s/schema_gen/output" % (CLOUD_STORAGE_PATH, self.collection_name)
 
     # delete folders
     self.cs.rmdir(hdfs_data_folder)
@@ -288,7 +288,7 @@ class Loader:
 
   def simple_data_transform(self):
 
-    hdfs_mr_output_folder = "%s/%s/data_transform/output" % (HDFS_PATH, self.collection_name)
+    hdfs_mr_output_folder = "%s/%s/data_transform/output" % (CLOUD_STORAGE_PATH, self.collection_name)
     transform_data_tmp_path = "%s/%s/data_transform/output" % (self.tmp_path, self.collection_name)
 
     command = "cat %s | json/transform-data-mapper.py %s/%s/%s,%s > /dev/null" \
@@ -309,8 +309,8 @@ class Loader:
 
   def mr_data_transform(self):
 
-    hdfs_data_folder = "%s/%s/data" % (HDFS_PATH, self.collection_name)
-    hdfs_mr_output_folder = "%s/%s/data_transform/output" % (HDFS_PATH, self.collection_name)
+    hdfs_data_folder = "%s/%s/data" % (CLOUD_STORAGE_PATH, self.collection_name)
+    hdfs_mr_output_folder = "%s/%s/data_transform/output" % (CLOUD_STORAGE_PATH, self.collection_name)
 
     # delete folders
     self.cs.rmdir(hdfs_mr_output_folder)
@@ -369,8 +369,8 @@ class Loader:
     else:
       full_table_name = "%s" % (table_name)
 
-    hdfs_path = "%s/%s/data_transform/output/%s/" % (HDFS_PATH, self.collection_name, shard_value)
-    self.dw.load_table(self.dw_database_name, full_table_name, hdfs_path)
+    cloud_storage_path = "%s/%s/data_transform/output/%s/" % (CLOUD_STORAGE_PATH, self.collection_name, shard_value)
+    self.dw.load_table(self.dw_database_name, full_table_name, cloud_storage_path)
 
     # extract bq_job_id and save to db
     return "%s/%s" % (data_import_id, shard_value)
@@ -437,7 +437,7 @@ class Loader:
     print 'Num records rejected %s' % self.num_records_rejected
     print 'Extracted data with %s from %s to %s' % (self.collection_sort_by_field, self.sort_by_field_min, self.sort_by_field_max)
     print 'Extracted files are located at: %s' % (' '.join(self.extract_file_names))
-    print 'Hive Tables: %s' % (' '.join(self.dw_table_names))
+    print 'Destination Tables: %s' % (' '.join(self.dw_table_names))
     print 'Schema is stored in Mongo %s.%s' % (self.schema_db_name, self.schema_collection_name)
 
 def usage():
