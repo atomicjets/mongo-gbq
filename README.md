@@ -8,11 +8,11 @@ Arrays are typically split into a different (child) BigQuery table with parent/c
 
 ## How it works
 
-1. Connects to your MongoDB and extract the specified collection into local file which is then copied to HDFS.
+1. Connects to your MongoDB and extract the specified collection into local file which is then copied to Google Cloud Storage.
 2. MapReduce generates schema (a copy is saved back to MongoDB for info).
-3. MapReduce transforms data, breaking the array into multiple files in HDFS output folder.
+3. MapReduce transforms data, breaking the array into multiple files in Google Cloud Storage output folder.
 4. Create BigQuery tables using schema generated in step 2.
-5. Load BigQuery tables using HDFS files generated in step 3.
+5. Load BigQuery tables using Google Cloud Storage files generated in step 3.
 
 ## Pre-requisites
 
@@ -33,8 +33,14 @@ pip install pymongo
 
 ## Install
 
-1. git clone this repo.
-2. Make sure you have gcloud command line utilities installed. Executables that this program depends on are:
+1. git clone this repo on the master node in your Hadoop cluster.
+2. Run this to compile custom code needed for MapReduce:
+
+  ```
+  cd java/MapReduce
+  mvn package
+  ```
+3. Make sure you have gcloud command line utilities installed in your Hadoop master mode. Executables that this program depends on are:
 
   ```
   gsutil
@@ -154,13 +160,13 @@ Notes:
 1. By default, extracted data is saved in `/tmp/onefold_mongo`. It can be changed by specifying the `tmp_path` parameter.
 2. If `--use_mr` parameter is specified, it will use MapReduce to generate schema and transform data. Otherwise, it runs the mapper and reducer via command line using `cat [input] | mapper | sort | reducer` metaphor. This is handy if you don't have many records and/or just want to get this going quickly.
 3. The generated files are in JSON format.
-4. Nested objects like `mobile` and `address` in the above example are flattened out in the BigQuer table.
+4. Nested objects like `mobile` and `address` in the above example are flattened out in the BigQuery table.
 5. `hash_code` column is added. It's basically an SHA1 hash of the object. It's useful later on when we use `hash_code` as parent-child key to represent array in a child table.
 
 
 ### Now let's try a more complex collection.
 
-In Mongo, create a complex_users collection with the following fields:
+In Mongo, create a `complex_users` collection with the following fields:
 ```
 > db.complex_users.find()
 { "_id" : ObjectId("5688d73c5d53fc2c133f342b"), "hobbies" : [ "reading", "cycling" ], "age" : 34, "work_history" : [ { "to" : "present", "from" : 2013, "name" : "IBM" }, { "to" : 2013, "from" : 2003, "name" : "Bell" } ], "utm_campaign" : "Google", "name" : "Alexander Keith", "app_version" : "2.5", "mobile" : { "device" : "iPhone", "carrier" : "Rogers" }, "address" : { "state" : "Ontario", "zipcode" : "M1K3A5", "street" : "26 Marshall Lane", "city" : "Toronto" } }
